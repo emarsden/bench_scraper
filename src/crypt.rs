@@ -1,5 +1,6 @@
 #![warn(missing_docs)]
 // https://textslashplain.com/2020/09/28/local-data-encryption-in-chromium/
+use std::collections::HashMap;
 use aes_gcm::aead::Aead;
 use aes_gcm::KeyInit;
 use cbc::cipher::BlockDecryptMut;
@@ -80,7 +81,7 @@ fn dpapi_crypt_unprotected_data(data: &[u8]) -> Result<Vec<u8>, Error> {
         let mut result: Vec<u8> = Vec::with_capacity(size);
         result.as_mut_ptr().copy_from(p_data_out.pbData, size);
         result.set_len(size);
-        winapi::um::winbase::LocalFree(p_data_out.pbData as *mut std::ffi::c_void);
+        winapi::um::winbase::LocalFree(p_data_out.pbData as *mut winapi::ctypes::c_void);
         Ok(result)
     }
 }
@@ -92,12 +93,12 @@ fn dpapi_crypt_unprotected_data(data: &[u8]) -> Result<Vec<u8>, Error> {
 #[cfg(target_os = "linux")]
 pub fn get_chromium_master_key(name: &str, _path: &std::path::Path) -> Result<ChromiumKey, Error> {
     debug!("Getting chromium master key for: {}", name);
-    let ss = secret_service::SecretService::new(secret_service::EncryptionType::Plain)?;
-    let items = ss.search_items(vec![("Label", name)])?;
-    let secret: Vec<u8> = items
+    let ss = secret_service::blocking::SecretService::connect(secret_service::EncryptionType::Plain)?;
+    let items = ss.search_items(HashMap::from([("Label", name)]))?;
+    let secret: Vec<u8> = items.unlocked
         .first()
         .map_or_else(|| Ok(DEFAULT_CHROMIUM_SECRET.to_vec()), |i| i.get_secret())?;
-    let salt = pbkdf2::password_hash::SaltString::b64_encode(CHROMIUM_SALT)?;
+    let salt = pbkdf2::password_hash::SaltString::encode_b64(CHROMIUM_SALT)?;
     let hash = pbkdf2::Pbkdf2.hash_password_customized(
         &secret,
         Some(pbkdf2::Algorithm::Pbkdf2Sha1.ident()),
@@ -143,6 +144,8 @@ pub fn get_chromium_master_key(name: &str, _path: &std::path::Path) -> Result<Ch
 }
 #[cfg(target_os = "windows")]
 pub fn get_chromium_master_key(_name: &str, path: &std::path::Path) -> Result<ChromiumKey, Error> {
+    use base64::prelude::*;
+
     debug!("Getting chromium master key from: {:?}", path);
     for entry_result in walkdir::WalkDir::new(path)
         .follow_links(true)
@@ -161,7 +164,7 @@ pub fn get_chromium_master_key(_name: &str, path: &std::path::Path) -> Result<Ch
                 .unwrap();
                 let encrypted_key: String =
                     value.dot_get("os_crypt.encrypted_key").unwrap().unwrap();
-                let encrypted = base64::decode(encrypted_key).unwrap();
+                let encrypted = BASE64_STANDARD.decode(encrypted_key).unwrap();
                 debug!(
                     "Found encrypted chromium master key: {:?}, {:?}",
                     encrypted,
